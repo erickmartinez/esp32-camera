@@ -1,1 +1,1 @@
-# esp32-camera
+# esp32-camera-trigger
