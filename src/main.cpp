@@ -2,7 +2,6 @@
 #include <WiFi.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <time.h>
 #include <secrets.h>
 #include "esp_wpa2.h"
 
@@ -11,23 +10,19 @@
 #define SERIAL_SPEED 115200
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 32 // OLED display height, in pixels
-#define I2C_SDA 1 
-#define I2C_SCL 2
+#define I2C_SDA 42 
+#define I2C_SCL 41
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
 #define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
 
 #define LED_GPIO   15
 #define PWM1_Ch    0
-#define PWM1_Res   13
+unsigned long PWM1_Res;
 
 const char* ssid = SECRET_SSID;
 const char* password = SECRET_PWD;
 
-// const char* ntpServer = "pool.ntp.org";
-// const long  gmtOffset_sec = -28800;
-// const int   daylightOffset_sec = 3600;
-// struct tm timeinfo;
 char responseBuffer[50];
 
 
@@ -51,6 +46,7 @@ unsigned long periodOn, periodMillis;
 char rxChar;
 bool triggerFlag, triggerRunning;
 bool initLedC;
+unsigned long maxDC;
 
 
 void updateDisplay() {
@@ -61,23 +57,17 @@ void updateDisplay() {
   display.setCursor(0, 0);     // Start at top-left corner
   display.print("IP: ");
   display.println(WiFi.localIP());
-  // if(!getLocalTime(&timeinfo)){
-  //   display.println("Failed to obtain time");
-  // } else {
-  //   display.print(&timeinfo, "%I"); //"Hour (12 hour format): "
-  //   display.print(":");
-  //   display.print(&timeinfo, "%M"); // Minute:
-  //   display.print(":");
-  //   display.println(&timeinfo, "%S"); // second
-  // }
+  
   snprintf(buff, sizeof(buff), "F: %4.2E Hz\nDC: %5.3f %%", frequency, dc);
   display.println(buff);
   display.display();
 }
 
 void updateFreq(unsigned long freq) {
+  ledcWrite(PWM1_Ch, 0);
   if (!initLedC) {
     ledcSetup(PWM1_Ch, freq, PWM1_Res);
+    initLedC = true;
   } else {
     ledcChangeFrequency(PWM1_Ch, freq, PWM1_Res);
   }
@@ -87,8 +77,10 @@ void updateDutyCycle() {
   dc = pulseWidth / period;
   if (dc > 1.0) {dc = 1.0;}
   frequency = (period > 0 ) ? (1000.0 / period) : 20E6 ;
-  dutyCycle = (unsigned long) (dc * 8191);
-  if (dutyCycle > 8191) {dutyCycle = 8191;}
+  PWM1_Res = (frequency >= 1E4) ? 8 : 12;
+  maxDC = (unsigned long) pow(2, (PWM1_Res)) - 1;
+  dutyCycle = (unsigned long) (dc * maxDC);
+  if (dutyCycle > maxDC) {dutyCycle = maxDC;}
   PWM1_Freq = (unsigned long) frequency;
   if (frequency >= 10) {
     updateFreq(PWM1_Freq);
@@ -111,22 +103,19 @@ float getDutyCycle() {
 void initWiFi() {
   WiFi.mode(WIFI_STA);
   // Configures static IP address
-  // if (!WiFi.config(local_IP, gateway, subnet)) {
-  //   Serial.println("STA Failed to configure");
-  // }
-  esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)EAP_ID, strlen(EAP_ID));
-  esp_wifi_sta_wpa2_ent_set_username((uint8_t *)EAP_USERNAME, strlen(EAP_USERNAME));
-  esp_wifi_sta_wpa2_ent_set_password((uint8_t *)EAP_PASSWORD, strlen(EAP_PASSWORD));
-  esp_wifi_sta_wpa2_ent_enable();
-  // esp_wpa2_config_t config = WPA2_CONFIG_INIT_DEFAULT(); 
-  // esp_err_t code = esp_wifi_sta_wpa2_ent_enable(&config);
-  // Serial.print("Code: ");
-  // Serial.println(code);
-  WiFi.begin(EAP_ID);
+  if (!WiFi.config(local_IP, gateway, subnet)) {
+    Serial.println("STA Failed to configure");
+  }
+  // esp_wifi_sta_wpa2_ent_set_identity((uint8_t *)EAP_ID, strlen(EAP_ID));
+  // esp_wifi_sta_wpa2_ent_set_username((uint8_t *)EAP_USERNAME, strlen(EAP_USERNAME));
+  // esp_wifi_sta_wpa2_ent_set_password((uint8_t *)EAP_PASSWORD, strlen(EAP_PASSWORD));
+  // esp_wifi_sta_wpa2_ent_enable();
 
-  // WiFi.begin(ssid, password);
+  WiFi.begin(SECRET_SSID);
+
+  WiFi.begin(ssid, password);
   Serial.print("Connecting to ");
-  Serial.println(EAP_ID);
+  Serial.println(SECRET_SSID);
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
     Serial.print(".");
@@ -166,8 +155,6 @@ void setup() {
   WiFi.onEvent(WiFiStationDisconnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   initWiFi();
   
-  //init and get the time
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     Serial.println(F("SSD1306 allocation failed"));
@@ -187,7 +174,7 @@ void setup() {
   period = 100; // milliseconds
   totalTimeMS = 10000; // milliseconds
   initLedC = false;
-  ledcSetup(PWM1_Ch, PWM1_Freq, PWM1_Res);
+  ledcSetup(PWM1_Ch, 100, 12);
   updateDutyCycle();
   ledcAttachPin(LED_GPIO, PWM1_Ch);
   ledcWrite(PWM1_Ch, 0);
@@ -217,7 +204,7 @@ void loop() {
   if (triggerRunning && (elapsedMillis <= totalTimeMS)) {
     if (frequency < 10.0) {
       if ((unsigned int) (currentMillis - previousOn) >= periodMillis) {
-        ledcWrite(PWM1_Ch, 8191);
+        ledcWrite(PWM1_Ch, maxDC);
         previousOn = currentMillis;
       }
       if ((unsigned int) (currentMillis - previousOn) >= periodOn) {
